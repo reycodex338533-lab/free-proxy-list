@@ -80,7 +80,6 @@ jobs:
         run: |
           $keyPath = Join-Path $env:RUNNER_TEMP 'relay_key'
           $knownHostsPath = Join-Path $env:RUNNER_TEMP 'known_hosts'
-          $scanErrorPath = Join-Path $env:RUNNER_TEMP 'ssh-keyscan.err'
 
           [System.IO.File]::WriteAllText($keyPath, $env:RELAY_SSH_KEY)
           & icacls.exe $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
@@ -88,21 +87,16 @@ jobs:
             throw "Não foi possível restringir as permissões da chave SSH. Código icacls: $LASTEXITCODE"
           }
 
-          # Prime known_hosts instead of disabling host verification.
-          $scan = Start-Process -FilePath 'ssh-keyscan.exe' -ArgumentList @('-H', $env:RELAY_HOST) -NoNewWindow -Wait -PassThru -RedirectStandardOutput $knownHostsPath -RedirectStandardError $scanErrorPath
-          if ($scan.ExitCode -ne 0) {
-            $scanError = Get-Content $scanErrorPath -Raw -ErrorAction SilentlyContinue
-            throw "Não foi possível obter a chave SSH do relay. $scanError"
-          }
-          if (-not (Test-Path $knownHostsPath) -or (Get-Item $knownHostsPath).Length -eq 0) {
-            throw 'Não foi possível obter a chave SSH do relay.'
-          }
+          # Pin the relay host key so the old runner ssh-keyscan is not needed.
+          $knownHost = '159.198.47.54 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJDhY9nF1rxXZw5lhw+NmQe0qrFuJJDM5wNBecilT0bh'
+          [System.IO.File]::WriteAllText($knownHostsPath, $knownHost + [Environment]::NewLine)
 
           $remoteForward = "0.0.0.0:$env:RELAY_PORT`:127.0.0.1:3389"
           $sshArgs = @(
             '-i', $keyPath,
             '-o', "UserKnownHostsFile=$knownHostsPath",
             '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'KexAlgorithms=curve25519-sha256,ecdh-sha2-nistp256,diffie-hellman-group14-sha256',
             '-o', 'ExitOnForwardFailure=yes',
             '-o', 'ServerAliveInterval=30',
             '-o', 'ServerAliveCountMax=3',
