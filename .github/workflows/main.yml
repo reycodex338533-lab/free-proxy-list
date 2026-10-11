@@ -80,12 +80,20 @@ jobs:
         run: |
           $keyPath = Join-Path $env:RUNNER_TEMP 'relay_key'
           $knownHostsPath = Join-Path $env:RUNNER_TEMP 'known_hosts'
+          $scanErrorPath = Join-Path $env:RUNNER_TEMP 'ssh-keyscan.err'
 
           [System.IO.File]::WriteAllText($keyPath, $env:RELAY_SSH_KEY)
-          icacls.exe $keyPath /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
+          & icacls.exe $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Não foi possível restringir as permissões da chave SSH. Código icacls: $LASTEXITCODE"
+          }
 
           # Prime known_hosts instead of disabling host verification.
-          ssh-keyscan.exe -H $env:RELAY_HOST 2>$null | Out-File -FilePath $knownHostsPath -Encoding ascii
+          $scan = Start-Process -FilePath 'ssh-keyscan.exe' -ArgumentList @('-H', $env:RELAY_HOST) -NoNewWindow -Wait -PassThru -RedirectStandardOutput $knownHostsPath -RedirectStandardError $scanErrorPath
+          if ($scan.ExitCode -ne 0) {
+            $scanError = Get-Content $scanErrorPath -Raw -ErrorAction SilentlyContinue
+            throw "Não foi possível obter a chave SSH do relay. $scanError"
+          }
           if (-not (Test-Path $knownHostsPath) -or (Get-Item $knownHostsPath).Length -eq 0) {
             throw 'Não foi possível obter a chave SSH do relay.'
           }
