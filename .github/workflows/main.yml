@@ -45,7 +45,9 @@ jobs:
         run: |
           Add-Type -AssemblyName System.Security
           $bytes = New-Object byte[] 18
-          [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          $rng.GetBytes($bytes)
+          $rng.Dispose()
           $password = [Convert]::ToBase64String($bytes).Replace('+','A').Replace('/','B').TrimEnd('=') + '!9'
           "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "::add-mask::$password"
