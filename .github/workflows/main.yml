@@ -49,11 +49,8 @@ jobs:
           $password = [Convert]::ToBase64String($bytes).Replace('+','A').Replace('/','B').TrimEnd('=') + '!9'
           "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "::add-mask::$password"
-          "## RDP credentials" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "- Host: $($env:RELAY_HOST):3390" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "- Username: runneradmin" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "- Password: $password" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "The password is generated for this run only." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $summary = "## RDP credentials`n`nHost: $($env:RELAY_HOST):3390`nUsername: runneradmin`nPassword: $password`n`nThe password is generated for this run only."
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $summary + [Environment]::NewLine)
 
       - name: Configure RDP User
         shell: powershell
