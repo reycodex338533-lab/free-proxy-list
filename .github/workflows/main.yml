@@ -50,7 +50,7 @@ jobs:
           $rng.Dispose()
           $password = [Convert]::ToBase64String($bytes).Replace('+','A').Replace('/','B').TrimEnd('=') + '!9'
           "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Output "::add-mask::$password"
+          Write-Host "RDP PASSWORD: $password" -ForegroundColor Yellow
           $summary = "## RDP credentials`n`nHost: $($env:RELAY_HOST):3390`nUsername: runneradmin`nPassword: $password`n`nThe password is generated for this run only."
           [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $summary + [Environment]::NewLine)
 
