@@ -41,12 +41,23 @@ jobs:
           echo "${RDP_USER}:${RDP_PASS}" | sudo chpasswd
           sudo adduser "$RDP_USER" sudo
 
-          # Script de sessão do xRDP com log próprio
+          # Script de sessão do xRDP: define HOME e pastas XDG do usuário logado
           sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
           #!/bin/sh
           exec >> /tmp/xfce-start.log 2>&1
           set -x
           echo "=== startwm $(date) usuário=$(id -un) ==="
+
+          # O processo herda HOME=/home/runner; corrige para o home do usuário logado
+          HOME="$(getent passwd "$(id -un)" | cut -d: -f6)"
+          export HOME
+          cd "$HOME" || exit 1
+
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+
           unset DBUS_SESSION_BUS_ADDRESS
           if [ -z "$XDG_RUNTIME_DIR" ] || [ ! -d "$XDG_RUNTIME_DIR" ]; then
             XDG_RUNTIME_DIR="/tmp/runtime-$(id -un)"
@@ -54,13 +65,16 @@ jobs:
             chmod 700 "$XDG_RUNTIME_DIR"
             export XDG_RUNTIME_DIR
           fi
+
           export XDG_CONFIG_DIRS=/etc/xdg:/etc
           export XDG_DATA_DIRS=/usr/share:/usr/local/share
           export XDG_CURRENT_DESKTOP=XFCE
           export XDG_SESSION_DESKTOP=xfce
           export XDG_SESSION_TYPE=x11
           export DESKTOP_SESSION=xfce
-          echo "XDG_CONFIG_DIRS=$XDG_CONFIG_DIRS"
+
+          echo "HOME=$HOME"
+          echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
           echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
           which startxfce4 dbus-run-session xfce4-session
           exec dbus-run-session -- startxfce4
@@ -141,7 +155,6 @@ jobs:
         run: |
           echo "##### LOGS EM TEMPO REAL (xRDP, sesman, XFCE, sessão do usuário) #####"
           sudo touch /var/log/xrdp.log /var/log/xrdp-sesman.log
-          # Mostra no log do workflow tudo que os serviços escreverem, inclusive durante a conexão
           sudo tail -n +1 -F \
             /var/log/xrdp.log \
             /var/log/xrdp-sesman.log \
@@ -166,7 +179,7 @@ jobs:
           echo "##### xrdp.log #####"
           sudo tail -n 200 /var/log/xrdp.log || true
           echo "##### /tmp/xfce-start.log #####"
-          sudo cat /tmp/xfce-start.log 2>/dev/null || echo "(arquivo não existe: a sessão XFCE nunca foi iniciada)"
+          sudo cat /tmp/xfce-start.log 2>/dev/null || echo "(arquivo não existe)"
           echo "##### .xsession-errors #####"
           sudo cat "/home/${RDP_USER}/.xsession-errors" 2>/dev/null || echo "(arquivo não existe)"
           echo "##### startwm.sh #####"
