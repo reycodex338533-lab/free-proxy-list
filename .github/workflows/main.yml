@@ -1,166 +1,119 @@
-name: PC criado pelo @alves7.pcm - RDP via túnel SSH reverso
+name: Desktop Remoto (Guacamole + Cloudflare Tunnel)
 
 on:
   workflow_dispatch:
     inputs:
       instance_number:
-        description: 'Instance Number (1-10)'
+        description: 'Número da instância (1-10)'
         required: false
         default: '1'
         type: string
 
 jobs:
-  deploy-rdp:
-    runs-on: windows-latest
+  deploy-guacamole:
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: System Information
-        shell: powershell
+      - name: Gerar usuários e senhas aleatórios
         run: |
-          Write-Host "=== RDP DEPLOYMENT VIA REVERSE SSH TUNNEL ===" -ForegroundColor Green
-          Write-Host "Instance Number: ${{ github.event.inputs.instance_number || '1' }}" -ForegroundColor Yellow
-          Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
-          Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
-          Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
-          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
-          Get-CimInstance -ClassName Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+          rand() { openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
+          GUAC_USER="u$(rand 8)"
+          GUAC_PASS="$(rand 20)"
+          RDP_USER="r$(rand 8)"
+          RDP_PASS="$(rand 20)"
+          echo "GUAC_USER=$GUAC_USER" >> "$GITHUB_ENV"
+          echo "GUAC_PASS=$GUAC_PASS" >> "$GITHUB_ENV"
+          echo "RDP_USER=$RDP_USER" >> "$GITHUB_ENV"
+          echo "RDP_PASS=$RDP_PASS" >> "$GITHUB_ENV"
 
-      - name: Enable RDP
-        shell: powershell
+      - name: Instalar XFCE e xRDP
         run: |
-          Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
-          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
-          Write-Host "RDP enabled with Network Level Authentication." -ForegroundColor Green
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11
+          echo "xfce4-session" > ~/.xsession
+          sudo adduser xrdp ssl-cert
+          sudo useradd -m -s /bin/bash "$RDP_USER"
+          echo "${RDP_USER}:${RDP_PASS}" | sudo chpasswd
+          sudo adduser "$RDP_USER" sudo
+          sudo systemctl enable --now xrdp
+          sudo systemctl status xrdp --no-pager
 
-      - name: Generate Temporary RDP Password
-        shell: powershell
-        env:
-          RELAY_HOST: ${{ secrets.RELAY_HOST }}
+      - name: Subir Guacamole (guacd + guacamole) via Docker
         run: |
-          Add-Type -AssemblyName System.Security
-          $bytes = New-Object byte[] 18
-          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-          $rng.GetBytes($bytes)
-          $rng.Dispose()
-          $password = [Convert]::ToBase64String($bytes).Replace('+','A').Replace('/','B').TrimEnd('=') + '!9'
-          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "RDP PASSWORD: $password" -ForegroundColor Yellow
-          $summary = "## RDP credentials`n`nHost: $($env:RELAY_HOST):3390`nUsername: runneradmin`nPassword: $password`n`nThe password is generated for this run only."
-          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $summary + [Environment]::NewLine)
+          mkdir -p guac-config
+          cat > guac-config/user-mapping.xml <<EOF
+          <user-mapping>
+            <authorize username="${GUAC_USER}" password="${GUAC_PASS}">
+              <connection name="Desktop Linux">
+                <protocol>rdp</protocol>
+                <param name="hostname">localhost</param>
+                <param name="port">3389</param>
+                <param name="username">${RDP_USER}</param>
+                <param name="password">${RDP_PASS}</param>
+                <param name="ignore-cert">true</param>
+                <param name="security">any</param>
+                <param name="resize-method">display-update</param>
+              </connection>
+            </authorize>
+          </user-mapping>
+          EOF
 
-      - name: Configure RDP User
-        shell: powershell
+          docker run -d --name guacd --network host guacamole/guacd
+
+          docker run -d --name guacamole --network host \
+            -e GUACD_HOSTNAME=localhost \
+            -e GUACAMOLE_HOME=/config \
+            -v "$PWD/guac-config:/config" \
+            guacamole/guacamole
+
+          for i in $(seq 1 60); do
+            if curl -fs http://localhost:8080/guacamole/ > /dev/null; then
+              echo "Guacamole pronto"
+              break
+            fi
+            sleep 3
+          done
+          curl -fs http://localhost:8080/guacamole/ > /dev/null || { docker logs guacamole; exit 1; }
+
+      - name: Abrir túnel público (Cloudflare)
         run: |
-          Write-Host "Configuring the RDP user..." -ForegroundColor Green
-          $securePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          $user = Get-LocalUser -Name 'runneradmin' -ErrorAction SilentlyContinue
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          nohup cloudflared tunnel --no-autoupdate --url http://localhost:8080 \
+            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
 
-          if ($null -eq $user) {
-            New-LocalUser -Name 'runneradmin' -Password $securePassword -AccountNeverExpires -PasswordNeverExpires:$false
-          } else {
-            Set-LocalUser -Name 'runneradmin' -Password $securePassword -AccountNeverExpires:$true
-          }
+          URL=""
+          for i in $(seq 1 30); do
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then cat "$RUNNER_TEMP/cloudflared.log"; exit 1; fi
+          echo "GUAC_URL=$URL/guacamole/" >> "$GITHUB_ENV"
 
-          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'runneradmin' -ErrorAction SilentlyContinue
-          Write-Host 'RDP user configured. The password is stored only in GitHub Secrets.' -ForegroundColor Green
-
-      - name: Open Reverse SSH Tunnel
-        shell: powershell
-        env:
-          RELAY_HOST: ${{ secrets.RELAY_HOST }}
-          RELAY_USER: ${{ secrets.RELAY_USER }}
-          RELAY_SSH_KEY: ${{ secrets.RELAY_SSH_KEY }}
-          RELAY_PORT: '3390'
+      - name: Mostrar credenciais de acesso
         run: |
-          $keyPath = Join-Path $env:RUNNER_TEMP 'relay_key'
-          $knownHostsPath = Join-Path $env:RUNNER_TEMP 'known_hosts'
+          echo "=============================================="
+          echo " DESKTOP PRONTO - Instância #${{ github.event.inputs.instance_number || '1' }}"
+          echo "=============================================="
+          echo " Acesso web : $GUAC_URL"
+          echo " Usuário    : $GUAC_USER"
+          echo " Senha      : $GUAC_PASS"
+          echo "----------------------------------------------"
+          echo " Após o login, escolha 'Desktop Linux'."
+          echo "=============================================="
 
-          [System.IO.File]::WriteAllText($keyPath, $env:RELAY_SSH_KEY)
-          & icacls.exe $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "Não foi possível restringir as permissões da chave SSH. Código icacls: $LASTEXITCODE"
-          }
-
-          # Pin the relay host key so the old runner ssh-keyscan is not needed.
-          $knownHost = '159.198.47.54 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJDhY9nF1rxXZw5lhw+NmQe0qrFuJJDM5wNBecilT0bh'
-          [System.IO.File]::WriteAllText($knownHostsPath, $knownHost + [Environment]::NewLine)
-
-          $remoteForward = "0.0.0.0:$env:RELAY_PORT`:127.0.0.1:3389"
-          $sshArgs = @(
-            '-i', $keyPath,
-            '-o', "UserKnownHostsFile=$knownHostsPath",
-            '-o', 'StrictHostKeyChecking=yes',
-            '-o', 'KexAlgorithms=curve25519-sha256,ecdh-sha2-nistp256,diffie-hellman-group14-sha256',
-            '-o', 'ExitOnForwardFailure=yes',
-            '-o', 'ServerAliveInterval=30',
-            '-o', 'ServerAliveCountMax=3',
-            '-N',
-            '-R', $remoteForward,
-            "$env:RELAY_USER@$env:RELAY_HOST"
-          )
-
-          Write-Host "Opening reverse SSH tunnel on relay port $env:RELAY_PORT..." -ForegroundColor Green
-          $sshProcess = Start-Process -FilePath 'ssh.exe' -ArgumentList $sshArgs -WindowStyle Hidden -PassThru
-          "SSH_PID=$($sshProcess.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Start-Sleep -Seconds 8
-
-          if ($sshProcess.HasExited) {
-            throw "O processo SSH encerrou imediatamente com código $($sshProcess.ExitCode). Verifique o relay, a chave e AllowTcpForwarding."
-          }
-
-          Write-Host "Reverse SSH tunnel is active." -ForegroundColor Green
-          Write-Host "RDP endpoint: $env:RELAY_HOST`:$env:RELAY_PORT" -ForegroundColor Yellow
-
-      - name: Connection Details
-        shell: powershell
-        env:
-          RELAY_HOST: ${{ secrets.RELAY_HOST }}
-          RELAY_PORT: '3390'
+      - name: Manter sessão ativa
         run: |
-          Write-Host "`n=== RDP CONNECTION DETAILS ===" -ForegroundColor Green
-          Write-Host "Host: $env:RELAY_HOST`:$env:RELAY_PORT" -ForegroundColor White
-          Write-Host "Username: runneradmin" -ForegroundColor White
-          Write-Host "Password: see the GitHub Actions run summary" -ForegroundColor White
-          Write-Host "`nOpen Remote Desktop (mstsc) and connect to the host above." -ForegroundColor Yellow
-          Write-Host "Do not print or expose the RDP password in workflow logs." -ForegroundColor Yellow
-
-      - name: Keep Session Alive
-        shell: powershell
-        env:
-          RELAY_HOST: ${{ secrets.RELAY_HOST }}
-          RELAY_PORT: '3390'
-        run: |
-          Write-Host "`n=== SESSION ACTIVE ===" -ForegroundColor Green
-          Write-Host "RDP endpoint: $env:RELAY_HOST`:$env:RELAY_PORT" -ForegroundColor Cyan
-          Write-Host "The runner remains available for up to 6 hours." -ForegroundColor Yellow
-
-          $counter = 0
-          while ($true) {
-            $counter++
-            $sshProcess = Get-Process -Id $env:SSH_PID -ErrorAction SilentlyContinue
-
-            if ($null -eq $sshProcess) {
-              Write-Host "SSH tunnel is no longer running." -ForegroundColor Red
-              exit 1
-            }
-
-            Write-Host "Session active - Heartbeat #$counter ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) - SSH tunnel ACTIVE" -ForegroundColor Green
-            Start-Sleep -Seconds 60
-          }
-
-      - name: Close Tunnel
-        if: always()
-        shell: powershell
-        run: |
-          if ($env:SSH_PID) {
-            Stop-Process -Id $env:SSH_PID -Force -ErrorAction SilentlyContinue
-          }
-          Remove-Item (Join-Path $env:RUNNER_TEMP 'relay_key') -Force -ErrorAction SilentlyContinue
-          Remove-Item (Join-Path $env:RUNNER_TEMP 'known_hosts') -Force -ErrorAction SilentlyContinue
-          Write-Host 'SSH tunnel process and temporary key files removed.' -ForegroundColor Green
+          while true; do
+            for c in guacd guacamole; do
+              docker ps --format '{{.Names}}' | grep -qx "$c" || { echo "Container $c caiu"; docker logs "$c" | tail -n 50; exit 1; }
+            done
+            pgrep -f cloudflared > /dev/null || { echo "cloudflared caiu"; exit 1; }
+            echo "Sessão ativa - $(date) - $GUAC_URL"
+            sleep 60
+          done
