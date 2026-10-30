@@ -29,29 +29,49 @@ jobs:
           echo "GUAC_PASS=$GUAC_PASS" >> "$GITHUB_ENV"
           echo "RDP_USER=$RDP_USER" >> "$GITHUB_ENV"
           echo "RDP_PASS=$RDP_PASS" >> "$GITHUB_ENV"
+          echo "Usuários gerados (senhas ocultas nesta etapa)."
 
       - name: Instalar XFCE e xRDP
         run: |
+          set -x
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-session xfce4-goodies xrdp xorgxrdp dbus-x11
           sudo adduser xrdp ssl-cert
           sudo useradd -m -s /bin/bash "$RDP_USER"
           echo "${RDP_USER}:${RDP_PASS}" | sudo chpasswd
           sudo adduser "$RDP_USER" sudo
+
+          # Script de sessão do xRDP com log próprio
           sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
           #!/bin/sh
+          exec >> /tmp/xfce-start.log 2>&1
+          set -x
+          echo "=== startwm $(date) usuário=$(id -un) ==="
           unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-          export XDG_CONFIG_DIRS=/etc/xdg
+          if [ -z "$XDG_RUNTIME_DIR" ] || [ ! -d "$XDG_RUNTIME_DIR" ]; then
+            XDG_RUNTIME_DIR="/tmp/runtime-$(id -un)"
+            mkdir -p "$XDG_RUNTIME_DIR"
+            chmod 700 "$XDG_RUNTIME_DIR"
+            export XDG_RUNTIME_DIR
+          fi
+          export XDG_CONFIG_DIRS=/etc/xdg:/etc
           export XDG_DATA_DIRS=/usr/share:/usr/local/share
           export XDG_CURRENT_DESKTOP=XFCE
           export XDG_SESSION_DESKTOP=xfce
+          export XDG_SESSION_TYPE=x11
+          export DESKTOP_SESSION=xfce
+          echo "XDG_CONFIG_DIRS=$XDG_CONFIG_DIRS"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+          which startxfce4 dbus-run-session xfce4-session
           exec dbus-run-session -- startxfce4
           EOF
           sudo chmod +x /etc/xrdp/startwm.sh
+
           sudo systemctl enable --now xrdp
           sudo systemctl restart xrdp
+          sleep 3
           sudo systemctl status xrdp --no-pager
+          sudo ss -ltnp | grep 3389 || echo "AVISO: porta 3389 não está escutando"
 
       - name: Subir Guacamole (guacd + guacamole) via Docker
         run: |
@@ -74,7 +94,6 @@ jobs:
           EOF
 
           docker run -d --name guacd --network host guacamole/guacd
-
           docker run -d --name guacamole --network host \
             -e GUACD_HOSTNAME=localhost \
             -e GUACAMOLE_HOME=/config \
@@ -88,7 +107,7 @@ jobs:
             fi
             sleep 3
           done
-          curl -fs http://localhost:8080/guacamole/ > /dev/null || { docker logs guacamole; exit 1; }
+          curl -fs http://localhost:8080/guacamole/ > /dev/null || { echo "--- logs do guacamole ---"; docker logs guacamole; exit 1; }
 
       - name: Abrir túnel público (Cloudflare)
         run: |
@@ -118,13 +137,37 @@ jobs:
           echo " Após o login, escolha 'Desktop Linux'."
           echo "=============================================="
 
-      - name: Manter sessão ativa
+      - name: Manter sessão ativa e exibir logs
         run: |
+          echo "##### LOGS EM TEMPO REAL (xRDP, sesman, XFCE, sessão do usuário) #####"
+          sudo touch /var/log/xrdp.log /var/log/xrdp-sesman.log
+          # Mostra no log do workflow tudo que os serviços escreverem, inclusive durante a conexão
+          sudo tail -n +1 -F \
+            /var/log/xrdp.log \
+            /var/log/xrdp-sesman.log \
+            /tmp/xfce-start.log \
+            "/home/${RDP_USER}/.xsession-errors" 2>&1 | sed -u 's/^/[LOG] /' &
+
           while true; do
             for c in guacd guacamole; do
-              docker ps --format '{{.Names}}' | grep -qx "$c" || { echo "Container $c caiu"; docker logs "$c" | tail -n 50; exit 1; }
+              docker ps --format '{{.Names}}' | grep -qx "$c" || { echo "::error::Container $c caiu"; docker logs "$c" | tail -n 50; exit 1; }
             done
-            pgrep -f cloudflared > /dev/null || { echo "cloudflared caiu"; exit 1; }
+            pgrep -f cloudflared > /dev/null || { echo "::error::cloudflared caiu"; exit 1; }
+            systemctl is-active --quiet xrdp || { echo "::error::xrdp parou"; sudo systemctl status xrdp --no-pager; exit 1; }
             echo "Sessão ativa - $(date) - $GUAC_URL"
             sleep 60
           done
+
+      - name: Diagnóstico final (executa mesmo se algo falhar)
+        if: always()
+        run: |
+          echo "##### xrdp-sesman.log #####"
+          sudo tail -n 200 /var/log/xrdp-sesman.log || true
+          echo "##### xrdp.log #####"
+          sudo tail -n 200 /var/log/xrdp.log || true
+          echo "##### /tmp/xfce-start.log #####"
+          sudo cat /tmp/xfce-start.log 2>/dev/null || echo "(arquivo não existe: a sessão XFCE nunca foi iniciada)"
+          echo "##### .xsession-errors #####"
+          sudo cat "/home/${RDP_USER}/.xsession-errors" 2>/dev/null || echo "(arquivo não existe)"
+          echo "##### startwm.sh #####"
+          cat /etc/xrdp/startwm.sh
